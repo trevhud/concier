@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory, Response, redirect, url_for, render_template, Blueprint
+from flask import Flask, request, jsonify, send_from_directory, Response, redirect, url_for, render_template, Blueprint, make_response
 from flask_cors import CORS
 from datetime import date
 from typing import Optional
@@ -15,7 +15,7 @@ import logging
 from dotenv import load_dotenv
 import langchain
 import io
-
+import json
 
 langchain.debug = True
 
@@ -29,16 +29,16 @@ logger = logging.getLogger(__name__)
 duffel_client = Duffel(access_token=os.getenv("DUFFEL_ACCESS_TOKEN"))
 
 class SearchFlights(BaseModel):
-    origin: str = Field(..., description="Origin airport code")
-    destination: str = Field(..., description="Destination airport code")
+    origin: str = Field(..., description="Origin IATA airport code")
+    destination: str = Field(..., description="Destination IATA airport code")
     departure_date: str = Field(..., description="Departure date in YYYY-MM-DD format")
     return_date: Optional[str] = Field(None, description="Return date in YYYY-MM-DD format (optional)")
-    cabin_class: Optional[str] = Field(None, description="Cabin class of the flight (economy, business, first)")
-
+    cabin_class: Optional[str] = Field(None, description="Cabin class of the flight (optional - economy, business, first - lowercase only)")
 
 @tool
 def search_flights(data: SearchFlights):
     """Search for flights with the given details."""
+    print(data)
     client = duffel_client
     slices = [
         {"origin": data.origin, "destination": data.destination, "departure_date": data.departure_date},
@@ -46,25 +46,32 @@ def search_flights(data: SearchFlights):
     if data.return_date:
         slices.append({"origin": data.destination, "destination": data.origin, "departure_date": data.return_date})
     
-    if data.cabin_class:
-        offer_request = (
-            client.offer_requests.create()
-            .passengers([{"type": "adult"}])
-            .slices(slices)
-            .return_offers()
-            .cabin_class(data.cabin_class)
-            .execute()
-        )
-    else:
-        offer_request = (
-            client.offer_requests.create()
-            .passengers([{"type": "adult"}])
-            .slices(slices)
-            .return_offers()
-            .execute()
-        )
+    try:
+        if data.cabin_class:
+            # Convert cabin_class to lowercase
+            cabin_class = data.cabin_class.lower()
+            offer_request = (
+                client.offer_requests.create()
+                .passengers([{"type": "adult"}])
+                .slices(slices)
+                .return_offers()
+                .cabin_class(cabin_class)
+                .execute()
+            )
+        else:
+            offer_request = (
+                client.offer_requests.create()
+                .passengers([{"type": "adult"}])
+                .slices(slices)
+                .return_offers()
+                .execute()
+            )
 
-    return [(offer.id, offer.owner.name, offer.slices[0].segments[0].departing_at, offer.total_amount, offer.total_currency) for offer in offer_request.offers]
+        return [(offer.id, offer.owner.name, {'outbound': {'departing_at': offer.slices[0].segments[0].departing_at, 'arriving_at': offer.slices[0].segments[0].arriving_at}, 'return': {'departing_at': offer.slices[1].segments[0].departing_at, 'arriving_at': offer.slices[1].segments[0].arriving_at}}, offer.total_amount, offer.total_currency) for offer in offer_request.offers]
+    except OfferRequestCreate.InvalidCabinClass as e:
+        return f"Invalid cabin class: {e}. Please use one of: economy, premium_economy, business, first."
+    except Exception as e:
+        return f"An error occurred while searching for flights: {e}"
 
 class SelectOffer(BaseModel):
     offer_id: str = Field(..., description="Selected offer ID")
@@ -79,8 +86,8 @@ class BookFlight(BaseModel):
     given_name: str = Field(..., description="Passenger's given name")
     family_name: str = Field(..., description="Passenger's family name")
     born_on: str = Field(..., description="Passenger's date of birth")
-    title: str = Field(..., description="Passenger's title")
-    gender: str = Field(..., description="Passenger's gender (m for male, f for female)")
+    title: Optional[str] = Field(None, description="Passenger's title")
+    gender: Optional[str] = Field(None, description="Passenger's gender (m for male, f for female)")
     phone_number: str = Field(..., description="Passenger's phone number")
     email: str = Field(..., description="Passenger's email")
 
@@ -168,61 +175,82 @@ def cancel_flight(data: CancelFlight):
         return f"Failed to cancel flight: {e}"
 
 # Define the chat prompt template
+def load_prompt():
+    prompt_path = os.path.join(os.path.dirname(__file__), 'prompt.txt')
+    with open(prompt_path, 'r') as file:
+        content = file.read()
+    
+    # Replace the date placeholder with the actual date
+    formatted_content = content.format(date=date.today())
+    
+    return formatted_content.strip()
+
+# Load the main prompt content
+prompt_content = load_prompt()
+
+# Create the full prompt template
 prompt = ChatPromptTemplate.from_messages([
-    ("system",f"""
-    You are a flight booking assistant powered, designed to assist users with the following specific tasks:
-
-    1. Search for flights: You can search for available flights based on the user's provided origin, destination, departure date, and optional return date.
-
-    2. Select flight offers: After searching for flights, you can help users select a specific flight offer to proceed with the booking process.
-
-    3. Book flights: Once a flight offer is selected, you can assist users in booking the flight by collecting necessary passenger details such as name, date of birth, title, gender, phone number, and email.
-
-    4. Create payments: You can create payments for the booked flights using the order ID, payment amount, currency, and payment type (e.g., 'balance').
-
-    5. Cancel flights: If needed, you can help users cancel their booked flights using the order ID.
-
-    Please note that today's date is {date.today()}. Your role is strictly limited to assisting with these flight booking tasks. You should not engage in any conversations or tasks unrelated to flight booking.
-
-    If a user asks for assistance with anything outside the scope of these defined tasks, politely inform them that you are a specialized flight booking assistant and cannot help with other matters. Respond with something along the lines of:
-
-    "I apologize, but I am a specialized flight booking assistant. My capabilities are limited to helping with flight searches, selecting flight offers, booking flights, creating payments, and canceling flights. I cannot assist with any tasks or conversations outside of these defined responsibilities. If you have any flight-related questions, please let me know, and I'll do my best to help."
-    """),
+    ("system", prompt_content),
     ("placeholder", "{chat_history}"),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}"),
 ])
 
-# Bind the tools to the model
-tools = [search_flights, select_offer, book_flight, create_payment, cancel_flight]
-
 # Initialize the LLM with the tools
-llm = ChatOpenAI(model="gpt-4o", temperature=0)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+tools = [search_flights, select_offer, book_flight, create_payment, cancel_flight]
 agent = create_tool_calling_agent(llm, tools, prompt)
 agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) #return_intermediate_steps = True
 
 app = Flask(__name__, static_folder='./build', static_url_path='/')
+
+CORS(app, supports_credentials=True)
+
 @app.route('/')
 def serve_react():
     return send_from_directory(app.static_folder, 'index.html')
 
+# File to store chat history
+CHAT_HISTORY_FILE = 'chat_history.json'
 
-CORS(app)
+def load_chat_history():
+    try:
+        with open(CHAT_HISTORY_FILE, 'r') as f:
+            content = f.read()
+            return json.loads(content) if content else []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
-# Initialize an empty chat history list
-chat_history = []
+def save_chat_history(chat_history):
+    with open(CHAT_HISTORY_FILE, 'w') as f:
+        json.dump(chat_history, f)
 
 # Function to calculate the number of tokens in a message
 def count_tokens(message):
-    return len(message.split()) * 4  # Approximation based on the assumption that 1 token = 4 characters
+    return len(message['text'].split())
 
 # Function to manage chat history
 def manage_chat_history(chat_history, max_tokens=100000):
-    total_tokens = sum(count_tokens(msg.content) for msg in chat_history)
+    total_tokens = sum(count_tokens(msg) for msg in chat_history)
     
-    while total_tokens > max_tokens:
+    while total_tokens > max_tokens and chat_history:
         removed_message = chat_history.pop(0)
-        total_tokens -= count_tokens(removed_message.content)
+        total_tokens -= count_tokens(removed_message)
+
+def convert_message_format(message, for_agent=True):
+    if for_agent:
+        return {
+            "role": "user" if message["sender"] == "user" else "assistant",
+            "content": message["text"]
+        }
+    else:
+        return {
+            "sender": "user" if message["role"] == "user" else "bot",
+            "text": message["content"]
+        }
+
+# Load chat history at startup
+chat_history = load_chat_history()
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -231,26 +259,51 @@ def chat():
     user_input = request.json.get("input")
     
     # Add user input to the chat history
-    chat_history.append(HumanMessage(content=user_input))
+    chat_history.append({"text": user_input, "sender": "user"})
 
     # Manage the chat history to ensure it doesn't exceed the token limit
-    manage_chat_history(chat_history, max_tokens=100000)
+    manage_chat_history(chat_history)
 
-    # Invoke the agent with the updated chat history
+    # Convert chat history for the agent
+    agent_chat_history = [convert_message_format(msg) for msg in chat_history]
+
+    # Invoke the agent with the converted chat history
     response = agent_executor.invoke(
         {
             "input": user_input,
-            "chat_history": chat_history,
+            "chat_history": agent_chat_history,
         }
     )
 
     # Add agent response to the chat history
-    chat_history.append(AIMessage(content=response["output"]))
+    bot_message = convert_message_format({"role": "assistant", "content": response["output"]}, for_agent=False)
+    chat_history.append(bot_message)
 
-    # Manage the chat history to ensure it doesn't exceed the token limit
-    manage_chat_history(chat_history, max_tokens=100000)
+    # Manage the chat history again
+    manage_chat_history(chat_history)
+
+    # Save the updated chat history
+    save_chat_history(chat_history)
 
     return jsonify({"response": response["output"]})
 
+@app.route('/clear_chat', methods=['POST'])
+def clear_chat():
+    global chat_history
+    chat_history = []
+    save_chat_history(chat_history)
+    return jsonify({"message": "Chat history cleared"})
+
+@app.after_request
+def after_request(response):
+    # print("After request: Adding CORS headers")
+    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    # print("Response headers:", dict(response.headers))
+    return response
+
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=8080)
