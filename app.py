@@ -2,14 +2,19 @@ from flask import Flask, request, jsonify, send_from_directory, Response, redire
 from flask_cors import CORS
 from datetime import date
 from typing import Optional
+
 from duffel_api import Duffel
 from duffel_api.http_client import ApiError
+from duffel_api.api.booking.payments import PaymentClient
+from duffel_api.api.booking.offer_requests import OfferRequestCreate
+
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
+
 import os
 import logging
 from dotenv import load_dotenv
@@ -28,24 +33,31 @@ logger = logging.getLogger(__name__)
 # Initialize Duffel client
 duffel_client = Duffel(access_token=os.getenv("DUFFEL_ACCESS_TOKEN"))
 
+
 class SearchFlights(BaseModel):
     origin: str = Field(..., description="Origin IATA airport code")
     destination: str = Field(..., description="Destination IATA airport code")
-    departure_date: str = Field(..., description="Departure date in YYYY-MM-DD format")
-    return_date: Optional[str] = Field(None, description="Return date in YYYY-MM-DD format (optional)")
-    cabin_class: Optional[str] = Field(None, description="Cabin class of the flight (optional - economy, business, first - lowercase only)")
+    departure_date: str = Field(...,
+                                description="Departure date in YYYY-MM-DD format")
+    return_date: Optional[str] = Field(
+        None, description="Return date in YYYY-MM-DD format (optional)")
+    cabin_class: Optional[str] = Field(
+        None, description="Cabin class of the flight (optional - economy, business, first - lowercase only)")
+
 
 @tool
 def search_flights(data: SearchFlights):
-    """Search for flights with the given details."""
+    """Initial search for flights with the given details."""
     print(data)
     client = duffel_client
     slices = [
-        {"origin": data.origin, "destination": data.destination, "departure_date": data.departure_date},
+        {"origin": data.origin, "destination": data.destination,
+            "departure_date": data.departure_date},
     ]
     if data.return_date:
-        slices.append({"origin": data.destination, "destination": data.origin, "departure_date": data.return_date})
-    
+        slices.append({"origin": data.destination,
+                      "destination": data.origin, "departure_date": data.return_date})
+
     try:
         if data.cabin_class:
             # Convert cabin_class to lowercase
@@ -66,20 +78,78 @@ def search_flights(data: SearchFlights):
                 .return_offers()
                 .execute()
             )
-
-        return [(offer.id, offer.owner.name, {'outbound': {'departing_at': offer.slices[0].segments[0].departing_at, 'arriving_at': offer.slices[0].segments[0].arriving_at}, 'return': {'departing_at': offer.slices[1].segments[0].departing_at, 'arriving_at': offer.slices[1].segments[0].arriving_at}}, offer.total_amount, offer.total_currency) for offer in offer_request.offers]
+        return {
+            'offer_request_id': offer_request.id,
+            'offers': [
+                (
+                    offer.id,
+                    offer.owner.name,
+                    {
+                        'outbound': {
+                            'departing_at': offer.slices[0].segments[0].departing_at,
+                            'arriving_at': offer.slices[0].segments[-1].arriving_at
+                        },
+                        'return': {
+                            'departing_at': offer.slices[1].segments[0].departing_at,
+                            'arriving_at': offer.slices[1].segments[-1].arriving_at
+                        } if len(offer.slices) > 1 else None
+                    },
+                    offer.total_amount,
+                    offer.total_currency
+                ) for offer in offer_request.offers
+            ]
+        }
     except OfferRequestCreate.InvalidCabinClass as e:
         return f"Invalid cabin class: {e}. Please use one of: economy, premium_economy, business, first."
     except Exception as e:
         return f"An error occurred while searching for flights: {e}"
 
+
+class ReturnMoreFlightsFromSearch(BaseModel):
+    offer_request_id: str = Field(...,
+                                  description="Offer Request ID from the initial search")
+
+
+@tool
+def return_more_flights_from_search(data: ReturnMoreFlightsFromSearch):
+    """Return more flights from the initial search to save time"""
+    client = duffel_client
+    try:
+        offer_request = client.offer_requests.list(limit=200)
+        return {
+            'offer_request_id': offer_request.id,
+            'offers': [
+                (
+                    offer.id,
+                    offer.owner.name,
+                    {
+                        'outbound': {
+                            'departing_at': offer.slices[0].segments[0].departing_at,
+                            'arriving_at': offer.slices[0].segments[-1].arriving_at
+                        },
+                        'return': {
+                            'departing_at': offer.slices[1].segments[0].departing_at,
+                            'arriving_at': offer.slices[1].segments[-1].arriving_at
+                        } if len(offer.slices) > 1 else None
+                    },
+                    offer.total_amount,
+                    offer.total_currency
+                ) for offer in offer_request.offers
+            ]
+        }
+    except Exception as e:
+        return f"We can't find your original offer list. Try searching flights again: {e}"
+
+
 class SelectOffer(BaseModel):
     offer_id: str = Field(..., description="Selected offer ID")
 
+
 @tool
 def select_offer(data: SelectOffer):
-    """Select an offer to proceed with booking."""
+    """Select an offer to proceed with booking. This is a required step before booking a flight."""
     return data.offer_id
+
 
 class BookFlight(BaseModel):
     id: str = Field(..., description="Selected offer ID")
@@ -87,18 +157,20 @@ class BookFlight(BaseModel):
     family_name: str = Field(..., description="Passenger's family name")
     born_on: str = Field(..., description="Passenger's date of birth")
     title: Optional[str] = Field(None, description="Passenger's title")
-    gender: Optional[str] = Field(None, description="Passenger's gender (m for male, f for female)")
+    gender: str = Field(...,
+                        description="Passenger's gender (m for male, f for female)")
     phone_number: str = Field(..., description="Passenger's phone number")
     email: str = Field(..., description="Passenger's email")
 
+
 @tool
 def book_flight(data: BookFlight):
-    """Put a flight booking on hold with the given offer and passenger details."""
+    """Put a flight booking on hold with the given offer and passenger details. This is not a complete booking, it is just a hold on the flight. You will need to create a payment for the hold before the flight can be booked."""
     client = duffel_client
     try:
         # Retrieve the offer details
         offer = client.offers.get(data.id)
-        
+
         if not offer:
             return f"Offer with ID {data.id} not found."
 
@@ -127,17 +199,18 @@ def book_flight(data: BookFlight):
     except ApiError as e:
         return f"Failed to put flight on hold: {e}"
 
-from duffel_api.api.booking.payments import PaymentClient
 
 class CreatePayment(BaseModel):
     order_id: str = Field(..., description="Order ID for the held booking")
     amount: str = Field(..., description="Payment amount")
     currency: str = Field(..., description="Payment currency")
-    payment_type: str = Field(..., description="Payment type (e.g., 'balance')")
+    payment_type: str = Field(...,
+                              description="Payment type (e.g., 'balance')")
+
 
 @tool
 def create_payment(data: CreatePayment):
-    """Create a payment for the held booking."""
+    """Create a payment for the held booking. After creating a payment, the flight can be fully booked and a confirmation should be returned to to the user."""
     client = PaymentClient(access_token=os.getenv("DUFFEL_ACCESS_TOKEN"))
     try:
         payment = {
@@ -159,8 +232,10 @@ def create_payment(data: CreatePayment):
     except ApiError as e:
         return f"Failed to create payment: {e}"
 
+
 class CancelFlight(BaseModel):
     order_id: str = Field(..., description="Order ID to cancel")
+
 
 @tool
 def cancel_flight(data: CancelFlight):
@@ -175,15 +250,18 @@ def cancel_flight(data: CancelFlight):
         return f"Failed to cancel flight: {e}"
 
 # Define the chat prompt template
+
+
 def load_prompt():
     prompt_path = os.path.join(os.path.dirname(__file__), 'prompt.txt')
     with open(prompt_path, 'r') as file:
         content = file.read()
-    
+
     # Replace the date placeholder with the actual date
     formatted_content = content.format(date=date.today())
-    
+
     return formatted_content.strip()
+
 
 # Load the main prompt content
 prompt_content = load_prompt()
@@ -198,20 +276,24 @@ prompt = ChatPromptTemplate.from_messages([
 
 # Initialize the LLM with the tools
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-tools = [search_flights, select_offer, book_flight, create_payment, cancel_flight]
+tools = [search_flights, return_more_flights_from_search,
+         select_offer, book_flight, create_payment, cancel_flight]
 agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) #return_intermediate_steps = True
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
 app = Flask(__name__, static_folder='./build', static_url_path='/')
 
 CORS(app, supports_credentials=True)
 
+
 @app.route('/')
 def serve_react():
     return send_from_directory(app.static_folder, 'index.html')
 
+
 # File to store chat history
 CHAT_HISTORY_FILE = 'chat_history.json'
+
 
 def load_chat_history():
     try:
@@ -221,21 +303,27 @@ def load_chat_history():
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
+
 def save_chat_history(chat_history):
     with open(CHAT_HISTORY_FILE, 'w') as f:
         json.dump(chat_history, f)
 
 # Function to calculate the number of tokens in a message
+
+
 def count_tokens(message):
     return len(message['text'].split())
 
 # Function to manage chat history
+
+
 def manage_chat_history(chat_history, max_tokens=100000):
     total_tokens = sum(count_tokens(msg) for msg in chat_history)
-    
+
     while total_tokens > max_tokens and chat_history:
         removed_message = chat_history.pop(0)
         total_tokens -= count_tokens(removed_message)
+
 
 def convert_message_format(message, for_agent=True):
     if for_agent:
@@ -249,15 +337,17 @@ def convert_message_format(message, for_agent=True):
             "text": message["content"]
         }
 
+
 # Load chat history at startup
 chat_history = load_chat_history()
+
 
 @app.route('/chat', methods=['POST'])
 def chat():
     global chat_history
 
     user_input = request.json.get("input")
-    
+
     # Add user input to the chat history
     chat_history.append({"text": user_input, "sender": "user"})
 
@@ -276,7 +366,8 @@ def chat():
     )
 
     # Add agent response to the chat history
-    bot_message = convert_message_format({"role": "assistant", "content": response["output"]}, for_agent=False)
+    bot_message = convert_message_format(
+        {"role": "assistant", "content": response["output"]}, for_agent=False)
     chat_history.append(bot_message)
 
     # Manage the chat history again
@@ -287,6 +378,7 @@ def chat():
 
     return jsonify({"response": response["output"]})
 
+
 @app.route('/clear_chat', methods=['POST'])
 def clear_chat():
     global chat_history
@@ -294,12 +386,16 @@ def clear_chat():
     save_chat_history(chat_history)
     return jsonify({"message": "Chat history cleared"})
 
+
 @app.after_request
 def after_request(response):
     # print("After request: Adding CORS headers")
-    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Origin',
+                         'http://localhost:3000')
+    response.headers.add('Access-Control-Allow-Headers',
+                         'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods',
+                         'GET,PUT,POST,DELETE,OPTIONS')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     # print("Response headers:", dict(response.headers))
     return response

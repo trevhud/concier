@@ -3,9 +3,12 @@ flask-cors
 flask
 duffel-api 
 langchain 
-langchain-core 
-pydantic 
-openai 
+langchain-core
 langchain_openai
 langchain-cli
 langsmith
+langgraph
+pydantic 
+openai 
+mypy-extensions
+types-requests
