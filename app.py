@@ -275,7 +275,7 @@ def cancel_flight(data: CancelFlight):
 
 
 def load_prompt():
-    prompt_path = os.path.join(os.path.dirname(__file__), 'prompt.txt')
+    prompt_path = os.path.join(os.path.dirname(__file__), 'prompts/concier.txt')
     with open(prompt_path, 'r') as file:
         content = file.read()
 

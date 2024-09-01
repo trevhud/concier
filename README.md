@@ -1,7 +1,7 @@
 
-# TravelAgentAI
+# Concier
 
-Travel Agent AI that can search flights, book flights, cancel flight bookings using OpenAI, LangChain, and Duffel API.
+AI Concierge service that can search flights, book flights, cancel flight bookings using OpenAI, LangChain, and Duffel API.
 
 ## Installation
 
@@ -35,8 +35,3 @@ Replace `<your_langsmith_api_key>` and `<project_name>` with your actual LangSmi
 To run the application, execute the following command:
 
 python app.py
-
-This README provides clear instructions on how to install, configure, and use your travel agent AI application. If you need further assistance, feel free to reach out!
-
-
-This should make it easier for users to understand and follow the instructions in you

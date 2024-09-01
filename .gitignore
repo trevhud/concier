@@ -25,7 +25,7 @@ yarn-error.log*
 
 venv/
 chat_history.json
-offer_requests.create.json
+samples/
 __pycache__/
 .vscode/
 build/
