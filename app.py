@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory, Response, redirect, url_for, render_template, Blueprint, make_response
 from flask_cors import CORS
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from duffel_api import Duffel
@@ -13,7 +13,8 @@ from langchain_core.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import HumanMessage, AIMessage
 
 import os
 import logging
@@ -21,6 +22,7 @@ from dotenv import load_dotenv
 import langchain
 import io
 import json
+import uuid
 
 langchain.debug = True
 
@@ -32,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 # Initialize Duffel client
 duffel_client = Duffel(access_token=os.getenv("DUFFEL_ACCESS_TOKEN"))
+
+# Add this to your global variables
+conversation_state = {}
 
 
 class SearchFlights(BaseModel):
@@ -48,7 +53,6 @@ class SearchFlights(BaseModel):
 @tool
 def search_flights(data: SearchFlights):
     """Initial search for flights with the given details."""
-    print(data)
     client = duffel_client
     slices = [
         {"origin": data.origin, "destination": data.destination,
@@ -60,7 +64,6 @@ def search_flights(data: SearchFlights):
 
     try:
         if data.cabin_class:
-            # Convert cabin_class to lowercase
             cabin_class = data.cabin_class.lower()
             offer_request = (
                 client.offer_requests.create()
@@ -78,31 +81,37 @@ def search_flights(data: SearchFlights):
                 .return_offers()
                 .execute()
             )
-        return {
+
+        def format_datetime(dt):
+            return dt.isoformat() if isinstance(dt, datetime) else dt
+
+        result = {
             'offer_request_id': offer_request.id,
             'offers': [
-                (
-                    offer.id,
-                    offer.owner.name,
-                    {
+                {
+                    'id': offer.id,
+                    'airline': offer.owner.name,
+                    'flights': {
                         'outbound': {
-                            'departing_at': offer.slices[0].segments[0].departing_at,
-                            'arriving_at': offer.slices[0].segments[-1].arriving_at
+                            'departing_at': format_datetime(offer.slices[0].segments[0].departing_at),
+                            'arriving_at': format_datetime(offer.slices[0].segments[-1].arriving_at)
                         },
                         'return': {
-                            'departing_at': offer.slices[1].segments[0].departing_at,
-                            'arriving_at': offer.slices[1].segments[-1].arriving_at
+                            'departing_at': format_datetime(offer.slices[1].segments[0].departing_at),
+                            'arriving_at': format_datetime(offer.slices[1].segments[-1].arriving_at)
                         } if len(offer.slices) > 1 else None
                     },
-                    offer.total_amount,
-                    offer.total_currency
-                ) for offer in offer_request.offers
+                    'total_amount': offer.total_amount,
+                    'total_currency': offer.total_currency
+                } for offer in offer_request.offers
             ]
         }
+        conversation_state['last_search_result'] = result
+        return json.dumps(result)
     except OfferRequestCreate.InvalidCabinClass as e:
         return f"Invalid cabin class: {e}. Please use one of: economy, premium_economy, business, first."
     except Exception as e:
-        return f"An error occurred while searching for flights: {e}"
+        return f"An error occurred while searching for flights: {str(e)}"
 
 
 class ReturnMoreFlightsFromSearch(BaseModel):
@@ -116,13 +125,13 @@ def return_more_flights_from_search(data: ReturnMoreFlightsFromSearch):
     client = duffel_client
     try:
         offer_request = client.offer_requests.list(limit=200)
-        return {
+        result = {
             'offer_request_id': offer_request.id,
             'offers': [
-                (
-                    offer.id,
-                    offer.owner.name,
-                    {
+                {
+                    'id': offer.id,
+                    'airline': offer.owner.name,
+                    'flights': {
                         'outbound': {
                             'departing_at': offer.slices[0].segments[0].departing_at,
                             'arriving_at': offer.slices[0].segments[-1].arriving_at
@@ -132,11 +141,13 @@ def return_more_flights_from_search(data: ReturnMoreFlightsFromSearch):
                             'arriving_at': offer.slices[1].segments[-1].arriving_at
                         } if len(offer.slices) > 1 else None
                     },
-                    offer.total_amount,
-                    offer.total_currency
-                ) for offer in offer_request.offers
+                    'total_amount': offer.total_amount,
+                    'total_currency': offer.total_currency
+                } for offer in offer_request.offers
             ]
         }
+        conversation_state['last_search_result'] = result
+        return json.dumps(result)
     except Exception as e:
         return f"We can't find your original offer list. Try searching flights again: {e}"
 
@@ -147,8 +158,9 @@ class SelectOffer(BaseModel):
 
 @tool
 def select_offer(data: SelectOffer):
-    """Select an offer to proceed with booking. This is a required step before booking a flight."""
-    return data.offer_id
+    """Choose an offer to proceed with booking. This is a required step before booking a flight."""
+    conversation_state['selected_offer_id'] = data.offer_id
+    return json.dumps({"selected_offer_id": data.offer_id})
 
 
 class BookFlight(BaseModel):
@@ -156,7 +168,7 @@ class BookFlight(BaseModel):
     given_name: str = Field(..., description="Passenger's given name")
     family_name: str = Field(..., description="Passenger's family name")
     born_on: str = Field(..., description="Passenger's date of birth")
-    title: Optional[str] = Field(None, description="Passenger's title")
+    title: str = Field(None, description="Passenger's title (mr, ms, mrs, miss)")
     gender: str = Field(...,
                         description="Passenger's gender (m for male, f for female)")
     phone_number: str = Field(..., description="Passenger's phone number")
@@ -168,11 +180,10 @@ def book_flight(data: BookFlight):
     """Put a flight booking on hold with the given offer and passenger details. This is not a complete booking, it is just a hold on the flight. You will need to create a payment for the hold before the flight can be booked."""
     client = duffel_client
     try:
-        # Retrieve the offer details
         offer = client.offers.get(data.id)
 
         if not offer:
-            return f"Offer with ID {data.id} not found."
+            return json.dumps({"error": f"Offer with ID {data.id} not found."})
 
         passengers = [
             {
@@ -195,9 +206,14 @@ def book_flight(data: BookFlight):
             .execute()
         )
 
-        return f"Created hold order {order.id} with booking reference {order.booking_reference}"
+        result = {
+            "order_id": order.id,
+            "booking_reference": order.booking_reference
+        }
+        conversation_state['last_booking'] = result
+        return json.dumps(result)
     except ApiError as e:
-        return f"Failed to put flight on hold: {e}"
+        return json.dumps({"error": f"Failed to put flight on hold: {e}"})
 
 
 class CreatePayment(BaseModel):
@@ -205,7 +221,7 @@ class CreatePayment(BaseModel):
     amount: str = Field(..., description="Payment amount")
     currency: str = Field(..., description="Payment currency")
     payment_type: str = Field(...,
-                              description="Payment type (e.g., 'balance')")
+                              description="Payment type (e.g., 'balance', 'card')")
 
 
 @tool
@@ -224,13 +240,15 @@ def create_payment(data: CreatePayment):
             .payment(payment)
             .execute()
         )
-        return f"Payment created with ID {payment_response.id}"
+        result = {"payment_id": payment_response.id}
+        conversation_state['last_payment'] = result
+        return json.dumps(result)
     except PaymentClient.InvalidPayment as e:
-        return f"Invalid payment data: {e}"
+        return json.dumps({"error": f"Invalid payment data: {e}"})
     except PaymentClient.InvalidPaymentType as e:
-        return f"Invalid payment type: {e}"
+        return json.dumps({"error": f"Invalid payment type: {e}"})
     except ApiError as e:
-        return f"Failed to create payment: {e}"
+        return json.dumps({"error": f"Failed to create payment: {e}"})
 
 
 class CancelFlight(BaseModel):
@@ -244,12 +262,16 @@ def cancel_flight(data: CancelFlight):
     try:
         order_cancellation = client.order_cancellations.create(data.order_id)
         client.order_cancellations.confirm(order_cancellation.id)
-        return f"Order {data.order_id} has been canceled. Refund amount: {order_cancellation.refund_amount} {order_cancellation.refund_currency}"
+        result = {
+            "order_id": data.order_id,
+            "refund_amount": order_cancellation.refund_amount,
+            "refund_currency": order_cancellation.refund_currency
+        }
+        conversation_state['last_cancellation'] = result
+        return json.dumps(result)
     except ApiError as e:
         logger.error(f"Failed to cancel flight: {e}")
-        return f"Failed to cancel flight: {e}"
-
-# Define the chat prompt template
+        return json.dumps({"error": f"Failed to cancel flight: {e}"})
 
 
 def load_prompt():
@@ -266,6 +288,12 @@ def load_prompt():
 # Load the main prompt content
 prompt_content = load_prompt()
 
+# Update the prompt to include instructions on using previous data
+prompt_content += """
+When using tools, always refer to the most recent data returned by previous tool calls. 
+If you need to use data from a previous search or selection, you can find it in the conversation state.
+"""
+
 # Create the full prompt template
 prompt = ChatPromptTemplate.from_messages([
     ("system", prompt_content),
@@ -274,12 +302,20 @@ prompt = ChatPromptTemplate.from_messages([
     ("placeholder", "{agent_scratchpad}"),
 ])
 
+session_id = str(uuid.uuid4())
+
 # Initialize the LLM with the tools
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 tools = [search_flights, return_more_flights_from_search,
          select_offer, book_flight, create_payment, cancel_flight]
+
+# Modify the agent initialization to include memory
+memory = ConversationBufferMemory(
+    memory_key="chat_history", return_messages=True, input_key="input")
+
 agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+agent_executor = AgentExecutor(
+    agent=agent, tools=tools, memory=memory, verbose=True)
 
 app = Flask(__name__, static_folder='./build', static_url_path='/')
 
@@ -308,13 +344,9 @@ def save_chat_history(chat_history):
     with open(CHAT_HISTORY_FILE, 'w') as f:
         json.dump(chat_history, f)
 
-# Function to calculate the number of tokens in a message
-
 
 def count_tokens(message):
     return len(message['text'].split())
-
-# Function to manage chat history
 
 
 def manage_chat_history(chat_history, max_tokens=100000):
@@ -325,17 +357,13 @@ def manage_chat_history(chat_history, max_tokens=100000):
         total_tokens -= count_tokens(removed_message)
 
 
-def convert_message_format(message, for_agent=True):
-    if for_agent:
+def convert_message_to_dict(message):
+    if isinstance(message, (HumanMessage, AIMessage)):
         return {
-            "role": "user" if message["sender"] == "user" else "assistant",
-            "content": message["text"]
+            "type": "human" if isinstance(message, HumanMessage) else "ai",
+            "content": message.content
         }
-    else:
-        return {
-            "sender": "user" if message["role"] == "user" else "bot",
-            "text": message["content"]
-        }
+    return str(message)
 
 
 # Load chat history at startup
@@ -344,52 +372,49 @@ chat_history = load_chat_history()
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    global chat_history
+    data = request.json
+    user_input = data.get('input', '')
+    conversation_state = data.get('conversation_state', {})
 
-    user_input = request.json.get("input")
+    # Prepare the input for the agent executor
+    agent_input = {
+        "input": user_input,
+        "chat_history": conversation_state.get('chat_history', [])
+    }
 
-    # Add user input to the chat history
-    chat_history.append({"text": user_input, "sender": "user"})
+    config = {"configurable": {"session_id": data.get('session_id')}}
 
-    # Manage the chat history to ensure it doesn't exceed the token limit
-    manage_chat_history(chat_history)
+    try:
+        response = agent_executor.invoke(agent_input, config=config)
+        
+        # Convert chat history to a serializable format
+        serializable_chat_history = [convert_message_to_dict(msg) for msg in response.get('chat_history', [])]
+        
+        # Update the conversation state
+        conversation_state['chat_history'] = serializable_chat_history
 
-    # Convert chat history for the agent
-    agent_chat_history = [convert_message_format(msg) for msg in chat_history]
-
-    # Invoke the agent with the converted chat history
-    response = agent_executor.invoke(
-        {
-            "input": user_input,
-            "chat_history": agent_chat_history,
-        }
-    )
-
-    # Add agent response to the chat history
-    bot_message = convert_message_format(
-        {"role": "assistant", "content": response["output"]}, for_agent=False)
-    chat_history.append(bot_message)
-
-    # Manage the chat history again
-    manage_chat_history(chat_history)
-
-    # Save the updated chat history
-    save_chat_history(chat_history)
-
-    return jsonify({"response": response["output"]})
+        return jsonify({
+            'response': response['output'],
+            'conversation_state': conversation_state
+        })
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/clear_chat', methods=['POST'])
 def clear_chat():
-    global chat_history
+    global chat_history, session_id, conversation_state
     chat_history = []
+    conversation_state = {}
     save_chat_history(chat_history)
-    return jsonify({"message": "Chat history cleared"})
+    # Generate a new session ID when clearing chat
+    session_id = str(uuid.uuid4())
+    return jsonify({"message": "Chat history cleared", "session_id": session_id})
 
 
 @app.after_request
 def after_request(response):
-    # print("After request: Adding CORS headers")
     response.headers.add('Access-Control-Allow-Origin',
                          'http://localhost:3000')
     response.headers.add('Access-Control-Allow-Headers',
@@ -397,7 +422,6 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods',
                          'GET,PUT,POST,DELETE,OPTIONS')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
-    # print("Response headers:", dict(response.headers))
     return response
 
 

@@ -12,3 +12,4 @@ pydantic
 openai 
 mypy-extensions
 types-requests
+uuid

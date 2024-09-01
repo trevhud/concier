@@ -1,0 +1,136 @@
+.chat-interface {
+  width: 100%;
+  max-width: 800px;
+  margin: 20px auto;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  box-sizing: border-box;
+}
+
+
+.message-list {
+  flex-grow: 1;
+  overflow-y: auto;
+  border: 1px solid #eee;
+  margin-bottom: 20px;
+  padding: 10px;
+  text-align: left;
+}
+
+.message {
+  margin-bottom: 10px;
+  padding: 5px 10px;
+  border-radius: 5px;
+}
+
+.user {
+  background-color: #e6f2ff;
+  text-align: right;
+}
+
+.bot {
+  background-color: #f0f0f0;
+  text-align: left;
+}
+
+form {
+  display: flex;
+}
+
+input[type="text"] {
+  flex-grow: 1;
+  padding: 10px;
+  font-size: 16px;
+}
+
+button {
+  padding: 10px 20px;
+  font-size: 16px;
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  cursor: pointer;
+}
+
+button:hover {
+  background-color: #45a049;
+}
+
+.default-messages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.default-message-chip {
+  background-color: #e0e0e0;
+  border: none;
+  border-radius: 16px;
+  padding: 8px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.default-message-chip:hover {
+  background-color: #d0d0d0;
+}
+
+.chat-controls {
+  display: flex;
+  padding: 10px;
+  background-color: #f0f0f0;
+}
+
+.chat-controls form {
+  flex-grow: 1;
+  display: flex;
+  margin-right: 10px;
+}
+
+.chat-controls input {
+  flex-grow: 1;
+  padding: 5px;
+  font-size: 16px;
+}
+
+.chat-controls button {
+  padding: 5px 10px;
+  font-size: 16px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  cursor: pointer;
+}
+
+.chat-controls button:hover {
+  background-color: #0056b3;
+}
+
+.clear-chat-button {
+  background-color: #dc3545;
+}
+
+.clear-chat-button:hover {
+  background-color: #c82333;
+}
+
+.loading-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #f3f3f3;
+  border-top: 2px solid #3498db;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}

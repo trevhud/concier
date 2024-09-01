@@ -1,0 +1,9 @@
+Build me a multi-agent software architecture diagram.
+
+The user will chat with an LLM, which will make function calls to search flights, select offers, and book flights. It will also need to dispatch calls to store user input and response data into a postgres database.
+
+The next time the user users the application, the LLM should be able to reference the stored data to make the booking process more seemless.
+
+The backend is python, frontend is react, database is postres. The agents are built with langchain.
+
+In addtion to the flights flow, I'd like to have a path for booking hotels and restaurants as well. 
