@@ -31,6 +31,13 @@ def initialize_agent_executor():
     prompt_content += """
     When using tools, always refer to the most recent data returned by previous tool calls. 
     If you need to use data from a previous search or selection, you can find it in the conversation state.
+    
+    Important: 
+    1. Always use the exact parameter names as specified in the tool descriptions.
+    2. Provide all required fields for each tool call.
+    3. Adhere strictly to the specified formats (e.g., YYYY-MM-DD for dates, 3-letter IATA codes for airports).
+    4. Double-check that all required parameters are provided and in the correct format before calling a tool.
+    5. If a tool call fails, review the error message carefully and correct the parameters before calling again.
     """
 
     # Create the full prompt template
@@ -42,7 +49,7 @@ def initialize_agent_executor():
     ])
 
     # Initialize the LLM with the tools
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
     tools = [search_flights, return_more_flights_from_search,
              select_offer, book_flight, create_payment, cancel_flight]
 
