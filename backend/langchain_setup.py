@@ -5,14 +5,14 @@ from typing import Annotated, Dict, List, Sequence, TypedDict
 
 import langchain
 from langchain.agents import create_tool_calling_agent
-from langchain.tools import BaseTool
+from langchain.tools import BaseTool, Tool
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
                                      SystemMessage, ToolMessage)
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, StateGraph  # type: ignore
 from langgraph.prebuilt import ToolExecutor
 
 from backend.duffel_tools import (book_flight, cancel_flight, create_payment,
@@ -29,7 +29,7 @@ from langchain.schema import AgentAction, AgentFinish
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
     memory: Annotated[ConversationBufferMemory, "The memory object for storing conversation history"]
-    tools: Annotated[List[ToolMessage], "The tools the agent has access to"]
+    tools: Annotated[List[BaseTool], "The tools the agent has access to"]
     prompt: Annotated[ChatPromptTemplate, "The prompt template for the agent"]
 
 def agent_node(state: AgentState, agent: Runnable):
@@ -40,12 +40,19 @@ def agent_node(state: AgentState, agent: Runnable):
         "input": messages[-1].content if messages else "",
         "chat_history": messages[:-1] if len(messages) > 1 else [],
         "memory": memory,
-        "intermediate_steps": [],  # Add this line
+        "intermediate_steps": [],
     }
     
     result = agent.invoke(agent_input)
-    memory.chat_memory.add_message(result)
-    return {"messages": messages + [result], "memory": memory}
+    if isinstance(result, BaseMessage):
+        memory.chat_memory.add_message(result)
+        return {"messages": list(messages) + [result], "memory": memory}
+    elif isinstance(result, dict) and "output" in result:
+        ai_message = AIMessage(content=result["output"])
+        memory.chat_memory.add_message(ai_message)
+        return {"messages": list(messages) + [ai_message], "memory": memory}
+    else:
+        raise ValueError(f"Unexpected result type: {type(result)}")
 
 def tool_node(state: AgentState):
     messages = state["messages"]
@@ -67,7 +74,7 @@ def tool_node(state: AgentState):
             response = tool_executor.invoke({"name": action_name, "arguments": action_input})
             tool_message = SystemMessage(content=f"Tool {action_name} output: {response}")
             memory.chat_memory.add_message(tool_message)
-            return {"messages": messages + [tool_message], "memory": memory}
+            return {"messages": list(messages) + [tool_message], "memory": memory}
     
     # If it's neither AgentFinish nor AgentAction, just return the current state
     return {"messages": messages, "memory": memory}
@@ -107,8 +114,38 @@ def initialize_agent_executor():
     # Initialize the LLM with the correct model
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
     
-    tools: List[BaseTool] = [search_flights, return_more_flights_from_search,
-             select_offer, book_flight, create_payment, cancel_flight]
+    tools: List[BaseTool] = [
+        Tool.from_function(
+            func=search_flights,
+            name="Search Flights",
+            description="Search for available flights"
+        ),
+        Tool.from_function(
+            func=return_more_flights_from_search,
+            name="Return More Flights",
+            description="Get more flight options from the previous search"
+        ),
+        Tool.from_function(
+            func=select_offer,
+            name="Select Offer",
+            description="Choose a specific flight offer"
+        ),
+        Tool.from_function(
+            func=book_flight,
+            name="Book Flight",
+            description="Book the selected flight"
+        ),
+        Tool.from_function(
+            func=create_payment,
+            name="Create Payment",
+            description="Process payment for the booked flight"
+        ),
+        Tool.from_function(
+            func=cancel_flight,
+            name="Cancel Flight",
+            description="Cancel a booked flight"
+        )
+    ]
 
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 

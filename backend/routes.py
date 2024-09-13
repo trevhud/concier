@@ -10,6 +10,8 @@ conversation_state = {}
 
 @bp.route('/')
 def serve_react():
+    if bp.static_folder is None:
+        raise ValueError("Static folder is not set")
     return send_from_directory(bp.static_folder, 'index.html')
 
 @bp.route('/clear_chat', methods=['POST'])
