@@ -14,10 +14,10 @@ from langchain_core.tools import tool
 
 from backend.globals import conversation_state
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 duffel_client = Duffel(access_token=os.getenv("DUFFEL_ACCESS_TOKEN"))
+
+# Add this near the top of the file, after imports
+logger = logging.getLogger(__name__)
 
 class SearchFlights(BaseModel):
     origin: str = Field(..., description="Origin IATA airport code")

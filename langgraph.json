@@ -1,0 +1,12 @@
+{
+  "dockerfile_lines": [],
+  "graphs": {
+    "concierge_graph": "./backend/langchain_setup.py:agent_workflow"
+  },
+  "env": "./.env",
+  "python_version": "3.11",
+  "dependencies": [
+    "langchain_openai",
+    "."
+  ]
+}

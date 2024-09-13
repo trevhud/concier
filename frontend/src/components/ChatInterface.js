@@ -1,75 +1,129 @@
 import React, { useState, useEffect, useRef } from 'react';
 import MessageList from './MessageList';
 import './ChatInterface.css';
+import io from 'socket.io-client';
+
+const defaultMessages = [
+  "Can I get a flight from Seattle to Alaska Sept 21 to 29?",
+  // Add more default messages here as needed
+];
 
 function ChatInterface() {
   const [messages, setMessages] = useState(() => {
-    // Load messages from localStorage on initial render
     const savedMessages = localStorage.getItem('chatMessages');
     return savedMessages ? JSON.parse(savedMessages) : [];
   });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [sessionId, setSessionId] = useState(() => {
+    return localStorage.getItem('sessionId') || '';
+  });
   const messagesEndRef = useRef(null);
+  const socketRef = useRef(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  useEffect(scrollToBottom, [messages]);
-
-  // Save messages to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem('chatMessages', JSON.stringify(messages));
-  }, [messages]);
+    socketRef.current = io('http://localhost:8080', {
+      withCredentials: true,
+      transports: ['websocket', 'polling']
+    });
+    if (!sessionId) {
+      fetchNewSessionId();
+    }
 
-  const handleSubmit = async (e) => {
-    if (e) e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    socketRef.current.on('connect', () => {
+      console.log('Connected to server');
+    });
 
-    const userMessage = { text: input, sender: 'user' };
-    const currentInput = input;
-    setMessages(prevMessages => [...prevMessages, userMessage]);
-    setInput('');
-    setIsLoading(true);
+    socketRef.current.on('chat_update', (data) => {
+      if (data.session_id === sessionId) {
+        setMessages(prevMessages => {
+          const newMessages = [...prevMessages, { text: data.response, sender: 'bot', isIntermediate: true }];
+          localStorage.setItem('chatMessages', JSON.stringify(newMessages));
+          return newMessages;
+        });
+      }
+    });
 
+    socketRef.current.on('chat_response', (data) => {
+      if (data.session_id === sessionId) {
+        setMessages(prevMessages => {
+          const newMessages = [
+            ...prevMessages.filter(msg => !msg.isIntermediate),
+            { text: data.response, sender: 'bot' }
+          ];
+          localStorage.setItem('chatMessages', JSON.stringify(newMessages));
+          return newMessages;
+        });
+        setIsLoading(false);
+      }
+    });
+
+    socketRef.current.on('chat_error', (data) => {
+      if (data.session_id === sessionId) {
+        setMessages(prevMessages => {
+          const newMessages = [
+            ...prevMessages.filter(msg => !msg.isIntermediate),
+            { text: `Error: ${data.error}`, sender: 'bot' }
+          ];
+          localStorage.setItem('chatMessages', JSON.stringify(newMessages));
+          return newMessages;
+        });
+        setIsLoading(false);
+      }
+    });
+
+    socketRef.current.on('chat_cleared', (data) => {
+      setSessionId(data.session_id);
+      localStorage.setItem('sessionId', data.session_id);
+      setMessages([]);
+      localStorage.removeItem('chatMessages');
+      setIsLoading(false);
+    });
+
+    return () => {
+      socketRef.current.disconnect();
+    };
+  }, [sessionId]);
+
+  const fetchNewSessionId = async () => {
     try {
-      setMessages(prevMessages => [...prevMessages, { text: 'Loading...', sender: 'bot', isLoading: true }]);
-
-      const response = await fetch('http://localhost:8080/chat', {
+      const response = await fetch('http://localhost:8080/new_session', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ input: currentInput }),
         credentials: 'include',
       });
 
       if (!response.ok) {
-        throw new Error('Network response was not ok');
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const data = await response.json();
-      setMessages(prevMessages => [
-        ...prevMessages.filter(msg => !msg.isLoading),
-        { text: data.response, sender: 'bot' }
-      ]);
+      setSessionId(data.session_id);
+      localStorage.setItem('sessionId', data.session_id);
     } catch (error) {
-      console.error('Error:', error);
-      setMessages(prevMessages => [
-        ...prevMessages.filter(msg => !msg.isLoading),
-        { text: 'Sorry, there was an error processing your request.', sender: 'bot' }
-      ]);
-    } finally {
-      setIsLoading(false);
+      console.error('Error fetching new session ID:', error);
     }
   };
 
-  const clearChat = async () => {
+  const handleSubmit = (e) => {
+    if (e) e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = { text: input, sender: 'user' };
+    setMessages(prevMessages => {
+      const newMessages = [...prevMessages, userMessage];
+      localStorage.setItem('chatMessages', JSON.stringify(newMessages));
+      return newMessages;
+    });
     setInput('');
-    setMessages([]);
-    localStorage.removeItem('chatMessages');
-    
+    setIsLoading(true);
+
+    socketRef.current.emit('chat', {
+      input: input,
+      session_id: sessionId
+    });
+  };
+
+  const clearChat = async () => {
     try {
       const response = await fetch('http://localhost:8080/clear_chat', {
         method: 'POST',
@@ -80,15 +134,16 @@ function ChatInterface() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      console.log('Chat history cleared on server');
+      const data = await response.json();
+      setSessionId(data.session_id);
+      localStorage.setItem('sessionId', data.session_id);
+      setMessages([]);
+      localStorage.removeItem('chatMessages');
+      setIsLoading(false);
     } catch (error) {
-      console.error('Error clearing chat history on server:', error);
+      console.error('Error clearing chat:', error);
     }
   };
-
-  const defaultMessages = [
-    "Can I get a flight from Seattle to Alaska Sept 21 to 29?"
-  ];
 
   const handleDefaultMessage = (message) => {
     setInput(message);
@@ -101,8 +156,8 @@ function ChatInterface() {
       <div ref={messagesEndRef} />
       <div className="default-messages">
         {defaultMessages.map((message, index) => (
-          <button 
-            key={index} 
+          <button
+            key={index}
             className="default-message-chip"
             onClick={() => handleDefaultMessage(message)}
           >
