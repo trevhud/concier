@@ -1,12 +1,12 @@
 import eventlet
 eventlet.monkey_patch()
 
-
 from flask import Flask
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
 import logging
+import os
 
 
 load_dotenv()
@@ -34,4 +34,13 @@ def create_app():
 app, socketio = create_app()
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=8080, host='0.0.0.0')
+    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    if debug_mode:
+        import debugpy
+        debugpy.listen(("0.0.0.0", 5678))
+        print("Waiting for debugger attach...")
+        debugpy.wait_for_client()
+        print("Debugger attached!")
+    
+    socketio.run(app, debug=debug_mode, use_reloader=False, port=8080, host='0.0.0.0')

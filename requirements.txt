@@ -63,3 +63,4 @@ uuid==1.30
 Werkzeug==3.0.4
 wsproto==1.2.0
 yarl==1.11.1
+debugpy==1.6.7

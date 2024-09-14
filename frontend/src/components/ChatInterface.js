@@ -24,11 +24,18 @@ function ChatInterface() {
   useEffect(() => {
     socketRef.current = io('http://localhost:8080', {
       withCredentials: true,
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
     });
+
     if (!sessionId) {
       fetchNewSessionId();
     }
+
+    socketRef.current.on('connect_error', (error) => {
+      console.error('Connection Error:', error);
+    });
 
     socketRef.current.on('connect', () => {
       console.log('Connected to server');

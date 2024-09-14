@@ -24,10 +24,11 @@ from langchain.globals import set_debug
 set_debug(True)
 
 from langchain.schema import AgentAction, AgentFinish
+from langchain_core.agents import AgentAction, AgentFinish
 
 
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
+    messages: Annotated[List[BaseMessage], "The messages in the conversation"]
     memory: Annotated[ConversationBufferMemory, "The memory object for storing conversation history"]
     tools: Annotated[List[BaseTool], "The tools the agent has access to"]
     prompt: Annotated[ChatPromptTemplate, "The prompt template for the agent"]
@@ -44,15 +45,26 @@ def agent_node(state: AgentState, agent: Runnable):
     }
     
     result = agent.invoke(agent_input)
+
+    new_message = None
+
     if isinstance(result, BaseMessage):
-        memory.chat_memory.add_message(result)
-        return {"messages": list(messages) + [result], "memory": memory}
+        new_message = result
     elif isinstance(result, dict) and "output" in result:
-        ai_message = AIMessage(content=result["output"])
-        memory.chat_memory.add_message(ai_message)
-        return {"messages": list(messages) + [ai_message], "memory": memory}
+        new_message = AIMessage(content=result["output"])
+    elif isinstance(result, AgentFinish):
+        new_message = AIMessage(content=result.return_values["output"])
+    elif isinstance(result, list):
+        for action in result:
+            if isinstance(action, AgentAction):
+                new_message = SystemMessage(content=f"Tool {action.tool} called with input: {action.tool_input}")
+                break  # Only take the first action if multiple are returned
+    
+    if new_message:
+        memory.chat_memory.add_message(new_message)
+        return {"messages": new_message, "memory": memory}
     else:
-        raise ValueError(f"Unexpected result type: {type(result)}")
+        return {"memory": memory}
 
 def tool_node(state: AgentState):
     messages = state["messages"]
@@ -74,14 +86,13 @@ def tool_node(state: AgentState):
             response = tool_executor.invoke({"name": action_name, "arguments": action_input})
             tool_message = SystemMessage(content=f"Tool {action_name} output: {response}")
             memory.chat_memory.add_message(tool_message)
-            return {"messages": list(messages) + [tool_message], "memory": memory}
+            return {"messages": tool_message, "memory": memory}
     
     # If it's neither AgentFinish nor AgentAction, just return the current state
-    return {"messages": messages, "memory": memory}
+    return {"memory": memory}
 
 def should_continue(state: AgentState) -> str:
-    messages = state["messages"]
-    last_message = messages[-1]
+    last_message = state["messages"]
     
     if isinstance(last_message, AIMessage):
         return "agent"
@@ -117,32 +128,32 @@ def initialize_agent_executor():
     tools: List[BaseTool] = [
         Tool.from_function(
             func=search_flights,
-            name="Search Flights",
+            name="search_flights",
             description="Search for available flights"
         ),
         Tool.from_function(
             func=return_more_flights_from_search,
-            name="Return More Flights",
+            name="return_more_flights",
             description="Get more flight options from the previous search"
         ),
         Tool.from_function(
             func=select_offer,
-            name="Select Offer",
+            name="select_offer",
             description="Choose a specific flight offer"
         ),
         Tool.from_function(
             func=book_flight,
-            name="Book Flight",
+            name="book_flight",
             description="Book the selected flight"
         ),
         Tool.from_function(
             func=create_payment,
-            name="Create Payment",
+            name="create_payment",
             description="Process payment for the booked flight"
         ),
         Tool.from_function(
             func=cancel_flight,
-            name="Cancel Flight",
+            name="cancel_flight",
             description="Cancel a booked flight"
         )
     ]
@@ -160,13 +171,12 @@ def initialize_agent_executor():
 
     workflow.set_entry_point("agent")
     workflow.add_edge("agent", "tool")
-    workflow.add_edge("tool", "agent")
+    workflow.add_edge("tool", "agent")  # Add this line to create an edge from tool to agent
 
     workflow.add_conditional_edges(
         "agent",
         should_continue,
         {
-            "agent": "agent",
             END: END,
         },
     )
