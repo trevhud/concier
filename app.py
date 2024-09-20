@@ -1,13 +1,10 @@
-import eventlet
-eventlet.monkey_patch()
-
-from flask import Flask
-from flask_cors import CORS
-from flask_socketio import SocketIO
+import os
+from typing import Dict, List
 from dotenv import load_dotenv
 import logging
-import os
-
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -16,31 +13,32 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def create_app():
-    from backend.routes import bp, setup_socketio_events
+    from backend.routes import router
 
-    app = Flask(__name__, static_folder='./build', static_url_path='/')
-    CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
-        
-    # Initialize SocketIO with the app
-    socketio = SocketIO(app, cors_allowed_origins="http://localhost:3000", async_mode='eventlet')
+    app = FastAPI()
 
-    app.register_blueprint(bp)
-    
-    # Setup SocketIO events
-    setup_socketio_events(socketio)
-    
-    return app, socketio
+    # CORS setup
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-app, socketio = create_app()
+    # Include API routes
+    app.include_router(router)
+
+    # Serve static files
+    app.mount("/static", StaticFiles(directory="./build", html=True), name="static")
+
+    return app
+
+app = create_app()
 
 if __name__ == '__main__':
-    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    import uvicorn
+    debug_mode = os.environ.get('FASTAPI_DEBUG', 'False').lower() == 'true'
     
-    if debug_mode:
-        import debugpy
-        debugpy.listen(("0.0.0.0", 5678))
-        print("Waiting for debugger attach...")
-        debugpy.wait_for_client()
-        print("Debugger attached!")
-    
-    socketio.run(app, debug=debug_mode, use_reloader=False, port=8080, host='0.0.0.0')
+    log_level = "debug" if debug_mode else "info"
+    uvicorn.run("app:app", host="0.0.0.0", port=8080, log_level=log_level, reload=debug_mode)

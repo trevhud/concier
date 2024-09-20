@@ -3,7 +3,6 @@ import os
 from datetime import date
 from typing import Annotated, Dict, List, Sequence, TypedDict
 
-import langchain
 from langchain.agents import create_tool_calling_agent
 from langchain.tools import BaseTool, Tool
 from langchain.memory import ConversationBufferMemory
@@ -121,9 +120,6 @@ def initialize_agent_executor():
         ("human", "{input}"),
         ("placeholder", "{agent_scratchpad}"),
     ])
-
-    # Initialize the LLM with the correct model
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
     
     tools: List[BaseTool] = [
         Tool.from_function(
@@ -158,27 +154,27 @@ def initialize_agent_executor():
         )
     ]
 
+    # Initialize the LLM with the correct model
+    llm = ChatOpenAI(model="gpt-4o-mini")
+
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
     # Create the agent outside of the node functions
-    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent = (prompt | llm)
 
     workflow = StateGraph(AgentState)
 
     # Pass the agent to the node function
     workflow.add_node("agent", functools.partial(agent_node, agent=agent))
-    workflow.add_node("tool", tool_node)
-
     workflow.set_entry_point("agent")
+
+    workflow.add_node("tool", tool_node)
     workflow.add_edge("agent", "tool")
     workflow.add_edge("tool", "agent")  # Add this line to create an edge from tool to agent
 
     workflow.add_conditional_edges(
         "agent",
-        should_continue,
-        {
-            END: END,
-        },
+        should_continue
     )
 
     # Set the initial state

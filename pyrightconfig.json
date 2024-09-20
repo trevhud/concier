@@ -1,8 +1,10 @@
 {
   "venvPath": ".",
-  "venv": "venv",
+  "venv": ".venv",
   "exclude": [
     "typings",
     ".venv"
-  ]
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
 }
