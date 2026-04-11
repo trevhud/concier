@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "concier-travel": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "/path/to/concier",
+      "env": {
+        "DUFFEL_ACCESS_TOKEN": "your-duffel-access-token",
+        "AMADEUS_CLIENT_ID": "your-amadeus-client-id",
+        "AMADEUS_CLIENT_SECRET": "your-amadeus-client-secret"
+      }
+    }
+  }
+}
